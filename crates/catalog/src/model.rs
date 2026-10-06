@@ -276,6 +276,13 @@ pub struct Photo {
     /// whether the user changed anything since (see [`crate::local`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_baseline: Option<u64>,
+    /// Raw files: the decoder had no colour matrix for this file (`matrix_is_fallback`: every
+    /// non-DNG raw today), so its colour is estimated from its own embedded JPEG and its white
+    /// balance controls are relative to the as-shot look ([`Photo::relative_wb`]). Recorded at
+    /// import (catalog format v3). `None`: imported before it was recorded — see
+    /// [`Photo::relative_wb`] for how those photos keep the white balance they were edited with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_matrix: Option<bool>,
 }
 
 /// What assisted culling measured on a photo.
@@ -324,6 +331,7 @@ impl Photo {
             analysis: None,
             preview_only: None,
             local_baseline: None,
+            fallback_matrix: None,
         }
     }
     /// A raw file developed from its sensor data: not a rendered image, and not a raw shown from
@@ -331,10 +339,13 @@ impl Photo {
     pub fn develops_raw(&self) -> bool {
         self.kind == MediaKind::Raw && self.preview_only.is_none()
     }
-    /// The current ARW reader has vendor WB multipliers but no measured camera illuminant.
-    /// Use adjustments relative to the camera's as-shot look, as for rendered photographs.
+    /// White balance controls are relative to the camera's as-shot look, as for rendered
+    /// photographs: the raw has vendor WB multipliers but no colour matrix
+    /// ([`Photo::fallback_matrix`]), so no measured illuminant to put an absolute Kelvin on.
+    /// Photos imported before that fact was recorded keep the rule they were edited under: Sony
+    /// ARW relative, every other raw absolute (so a saved Custom white balance reads the same).
     pub fn relative_wb(&self) -> bool {
-        self.develops_raw() && self.format.eq_ignore_ascii_case("ARW")
+        self.develops_raw() && self.fallback_matrix.unwrap_or_else(|| self.format.eq_ignore_ascii_case("ARW"))
     }
     /// The develop settings import gave this photo: [`Photo::camera_defaults`], or the user's
     /// default preset applied on top of them ([`Photo::import_look`]).
@@ -420,5 +431,28 @@ mod edited_tests {
         assert!(p.is_edited());
         p.develop = Arc::new(DevelopSettings::default());
         assert!(!p.is_edited(), "a full reset is unedited too");
+    }
+
+    #[test]
+    fn relative_wb_follows_the_decoder_fact_and_keeps_old_photos_rule() {
+        let mut p = Photo::new(PhotoId(1), Source::Demo { scene: 0 }, "a.nef", "NEF", 10, 10, "");
+        p.kind = MediaKind::Raw;
+        p.as_shot_wb = Some((5200.0, 4.0));
+        // imported before the fact was recorded: only ARW was relative
+        assert!(!p.relative_wb());
+        assert_eq!(p.camera_defaults().wb.temp, 5200.0);
+        p.fallback_matrix = Some(true);
+        assert!(p.relative_wb());
+        assert_eq!(p.camera_defaults().wb.temp, 6500.0);
+        p.format = "ARW".into();
+        p.fallback_matrix = None;
+        assert!(p.relative_wb());
+        p.fallback_matrix = Some(false);
+        assert!(!p.relative_wb(), "a raw with a matrix of its own has absolute WB");
+        p.fallback_matrix = Some(true);
+        p.preview_only = Some("unsupported".into());
+        assert!(!p.relative_wb(), "shown from its embedded JPEG");
+        let json = serde_json::to_string(&Photo::new(PhotoId(2), Source::Demo { scene: 0 }, "b.jpg", "JPEG", 1, 1, "")).unwrap();
+        assert!(!json.contains("fallback_matrix"), "{json}");
     }
 }

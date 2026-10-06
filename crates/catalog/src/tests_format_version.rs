@@ -47,6 +47,28 @@ fn v1_library_loads_and_is_upgraded() {
     assert_eq!((r.replayed, r.upgraded_from), (1, None));
 }
 
+/// v3 records whether a raw lacks a colour matrix; v2 photos load without it and keep the white
+/// balance rule they were edited under (only ARW relative).
+#[test]
+fn v2_raws_load_without_the_matrix_fact() {
+    let mut c = Catalog::new();
+    for (name, format) in [("a.nef", "NEF"), ("b.arw", "ARW")] {
+        let id = c.alloc_photo_id();
+        let mut p = Photo::new(id, Source::File { path: format!("/p/{name}") }, name, format, 4, 3, "2026-01-01");
+        p.kind = MediaKind::Raw;
+        c.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    }
+    let snap = c.to_snapshot();
+    assert!(!snap.contains("fallback_matrix"));
+    let m = MemStore::new();
+    m.set(SNAPSHOT, format!("{{\"format\":\"lightcraft-catalog\",\"version\":2,\"seq\":2,\"catalog\":{snap}}}\n").into_bytes());
+    let (_, loaded, r) = Journal::open(Box::new(m.clone())).unwrap();
+    assert_eq!(r.upgraded_from, Some(2));
+    assert_eq!(snapshot_version(&m), u64::from(VERSION));
+    let rel: Vec<_> = loaded.photos().map(|p| (p.format.clone(), p.fallback_matrix, p.relative_wb())).collect();
+    assert!(rel.contains(&("NEF".into(), None, false)) && rel.contains(&("ARW".into(), None, true)), "{rel:?}");
+}
+
 #[test]
 fn versionless_log_only_library_is_upgraded() {
     let mut c = Catalog::new();
@@ -147,6 +169,8 @@ fn bad_crc_is_still_a_torn_tail() {
 /// variant here under the new version.
 #[test]
 fn op_variants_are_versioned() {
+    /// The newest format that added serialized fields but no op.
+    const FIELDS_ONLY_SINCE: u32 = 3;
     fn since(op: &Op) -> u32 {
         match op {
             Op::AddPhoto { .. }
@@ -182,5 +206,6 @@ fn op_variants_are_versioned() {
         }
     }
     let newest = since(&Op::SetBrowsed { folder: String::new(), at: None });
-    assert_eq!(newest, VERSION, "the newest op's version must be the current format version");
+    // v3 added a field only (`Photo.fallback_matrix`); a new op takes the next version.
+    assert_eq!(newest.max(FIELDS_ONLY_SINCE), VERSION, "the newest op's (or field's) version must be the current format version");
 }

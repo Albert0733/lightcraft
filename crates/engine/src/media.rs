@@ -25,8 +25,9 @@ use lightcraft_preview::{Hash128, Hasher128, Lru, PreviewCache};
 use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
 use serde::{Deserialize, Serialize};
 
-/// Bump when the pipeline's output changes, to invalidate cached thumbnails.
-pub const RENDER_CACHE_VERSION: u64 = 7;
+/// Bump when the pipeline's output changes, to invalidate cached thumbnails. A new camera-look fit
+/// ([`crate::camera_preview::FIT_VERSION`]) invalidates them by itself.
+pub const RENDER_CACHE_VERSION: u64 = 8 | (crate::camera_preview::FIT_VERSION << 32);
 
 /// Thumbnails render at one of these long edges (so window/cell size changes reuse the cache).
 pub const THUMB_SIZES: [usize; 4] = [128, 256, 384, 512];
@@ -87,9 +88,18 @@ impl DecodedSource {
     }
 
     /// What to render these pixels against: the decoder's facts, else `header` (the catalog's)
-    /// with any stored camera tone curve.
+    /// with any stored camera tone curve. For a catalogued raw (`header.raw`) the catalog keeps
+    /// deciding how white balance settings are read — relative or absolute, around which as-shot
+    /// white — because the photo's saved settings were made under that rule
+    /// ([`lightcraft_catalog::Photo::relative_wb`]).
     pub fn info_or(&self, header: SourceInfo) -> SourceInfo {
-        self.info.unwrap_or(SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header })
+        match self.info {
+            Some(info) if info.raw && header.raw => {
+                SourceInfo { relative_wb: header.relative_wb, as_shot_temp: header.as_shot_temp, as_shot_tint: header.as_shot_tint, ..info }
+            }
+            Some(info) => info,
+            None => SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header },
+        }
     }
 }
 
@@ -841,6 +851,8 @@ pub struct ProbeInfo {
     /// A raw variant that can't be decoded yet: why. The file is described (and will be shown and
     /// edited) from its embedded preview; see [`lightcraft_catalog::Photo::preview_only`].
     pub preview_only: Option<String>,
+    /// Raws: the decoder has no colour matrix for the file ([`lightcraft_catalog::Photo::fallback_matrix`]).
+    pub fallback_matrix: Option<bool>,
 }
 
 pub type FileProbe = Arc<dyn Fn(&str) -> Result<ProbeInfo, String> + Send + Sync>;
@@ -848,6 +860,26 @@ pub type FileProbe = Arc<dyn Fn(&str) -> Result<ProbeInfo, String> + Send + Sync
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decoder says a NEF has no matrix (relative WB), but a photo catalogued before that
+    /// fact was recorded was edited under absolute WB: the catalog's rule wins, the decoder's
+    /// pixels and camera tone are used.
+    #[test]
+    fn catalog_decides_how_raw_white_balance_is_read() {
+        let tone = lightcraft_pipeline::tone::CameraTone::new(std::array::from_fn(|i| [0.01 * (i + 1) as f32, 0.02 * (i + 1) as f32])).unwrap();
+        let decoded = SourceInfo { raw: true, relative_wb: true, camera_tone: Some(tone), ..Default::default() };
+        let source = DecodedSource::new(Arc::new(Rgb32f::new(2, 2)), Some(decoded));
+        let mut p = Photo::new(PhotoId(1), Source::File { path: "/x/a.nef".into() }, "a.nef", "NEF", 2, 2, "");
+        p.kind = MediaKind::Raw;
+        p.as_shot_wb = Some((5100.0, 3.0));
+        let info = source.info_or(source_info(&p));
+        assert_eq!((info.relative_wb, info.as_shot_temp, info.as_shot_tint, info.camera_tone), (false, 5100.0, 3.0, Some(tone)));
+        p.fallback_matrix = Some(true);
+        let info = source.info_or(source_info(&p));
+        assert_eq!((info.relative_wb, info.as_shot_temp, info.as_shot_tint), (true, 6500.0, 0.0));
+        // A file with no catalog record (header not raw) keeps the decoder's view.
+        assert_eq!(source.info_or(SourceInfo::default()), decoded);
+    }
 
     #[test]
     fn decoder_info_survives_render_jobs_cache_and_eviction() {

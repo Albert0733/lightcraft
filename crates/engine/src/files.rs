@@ -131,11 +131,13 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             std::mem::swap(&mut w, &mut h);
         }
         let (t, tint) = xy_to_temp_tint(lightcraft_raw::color::as_shot_white_xy_of(&raw));
-        // Vendor RGB multipliers do not identify an absolute illuminant without camera calibration.
-        let relative = raw.format == lightcraft_raw::RawFormat::Arw && !lightcraft_raw::color::has_matrix(&raw.color);
+        // Vendor RGB multipliers do not identify an absolute illuminant without camera calibration
+        // (the same decoder fact as `CameraTransform::matrix_is_fallback`).
+        let relative = !lightcraft_raw::color::has_matrix(&raw.color);
         let as_shot_wb = Some(if relative { (6500.0, 0.0) } else { (t.round(), tint.round()) });
         let embedded_lens = embedded_lens(&raw);
         return Ok(ProbeInfo {
+            fallback_matrix: Some(relative),
             embedded_lens,
             width: w,
             height: h,
@@ -178,6 +180,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
         embedded_lens: None,
         xmp: None,
         preview_only: None,
+        fallback_matrix: None,
     })
 }
 
@@ -285,7 +288,9 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
             eprintln!("[profile] raw source {}×{} (max {max_edge}, ms after decode): {}", img.width, img.height, parts.join(", "));
         }
         let (temp, tint) = xy_to_temp_tint(xy);
-        let relative = raw.format == lightcraft_raw::RawFormat::Arw && t.matrix_is_fallback;
+        // The catalog's record of this fact decides how saved WB settings are read (see
+        // `DecodedSource::info_or`); this is the decoder's view of a file nobody catalogued.
+        let relative = t.matrix_is_fallback;
         let camera_tone = camera_look.map(|p| p.tone).or_else(|| raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve));
         let (temp, tint) = if relative { (6500.0, 0.0) } else { (temp.round(), tint.round()) };
         return Ok((img, SourceInfo { raw: true, as_shot_temp: temp, as_shot_tint: tint, lens, relative_wb: relative, camera_tone }));
@@ -513,6 +518,36 @@ mod tests {
         s.execute("photo.relink", &json!({"id": id.0, "path": dng.to_string_lossy()})).unwrap();
         assert_eq!(s.catalog.photo(id).unwrap().preview_only, None);
         drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whether a raw's white balance is relative comes from the decoder (no colour matrix), not
+    /// from its extension, and import records it on the photo.
+    #[test]
+    fn import_records_whether_the_raw_has_a_colour_matrix() {
+        let with = crate::tests_xmp::synthetic_dng_with(None, lightcraft_meta::Metadata::default());
+        let mut raw = lightcraft_raw::decode(&with).unwrap();
+        raw.color.color_matrix = [None, None];
+        raw.color.as_shot_neutral = None;
+        raw.wb_multipliers = Some([2.0, 1.0, 1.5]);
+        let without = lightcraft_raw::write_dng(&raw, &Default::default()).unwrap();
+        let p = probe_bytes("a.dng", &with).unwrap();
+        assert_eq!(p.fallback_matrix, Some(false));
+        assert_ne!(p.as_shot_wb, Some((6500.0, 0.0)));
+        let p = probe_bytes("a.dng", &without).unwrap();
+        assert_eq!((p.fallback_matrix, p.as_shot_wb), (Some(true), Some((6500.0, 0.0))));
+        let (_, info) = load_bytes(&without, 64).unwrap();
+        assert!(info.relative_wb);
+        assert!(!load_bytes(&with, 64).unwrap().1.relative_wb);
+        let dir = std::env::temp_dir().join(format!("lc-fallback-matrix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("no-matrix.dng"), &without).unwrap();
+        let mut s = crate::Session::new().with_fs();
+        let r = s.execute("library.import", &serde_json::json!({"paths": [dir.to_string_lossy()]})).unwrap();
+        let id = lightcraft_catalog::PhotoId(r["imported"][0].as_u64().unwrap());
+        let p = s.catalog.photo(id).unwrap();
+        assert_eq!(p.fallback_matrix, Some(true));
+        assert!(p.relative_wb() && crate::media::source_info(p).relative_wb);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

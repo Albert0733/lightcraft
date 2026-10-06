@@ -876,6 +876,7 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                 p.content_hash = info.content_hash;
                 p.embedded_lens = info.embedded_lens;
                 p.preview_only = info.preview_only.clone();
+                p.fallback_matrix = info.fallback_matrix;
                 apply_import_defaults(s, &mut p);
                 if let Some(sc) = &sidecar {
                     crate::sidecar::merge_into(&mut p, sc, &now);
@@ -986,6 +987,7 @@ impl Session {
             p.as_shot_wb = info.as_shot_wb;
             p.embedded_lens = info.embedded_lens;
             p.preview_only = info.preview_only.clone();
+            p.fallback_matrix = info.fallback_matrix;
         }
         p.develop = std::sync::Arc::new(p.import_defaults());
         let edge = edge.clamp(64, crate::media::SourceLevel::Thumb.max_edge());
