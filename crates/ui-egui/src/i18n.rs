@@ -12,25 +12,37 @@ pub enum Language {
     En,
     #[serde(rename = "ja")]
     Ja,
+    // AI編輯：新增繁體中文（zh-Hant）介面語言。
+    #[serde(rename = "zh-hant")]
+    ZhHant,
 }
 
 impl Language {
-    pub const ALL: [Self; 2] = [Self::En, Self::Ja];
+    pub const ALL: [Self; 3] = [Self::En, Self::Ja, Self::ZhHant];
     pub fn name(self) -> &'static str {
         match self {
             Self::En => "English",
             Self::Ja => "日本語",
+            // AI編輯：新增語言名稱。
+            Self::ZhHant => "繁體中文",
         }
     }
     pub fn parse(code: &str) -> Option<Self> {
         match code {
             "en" => Some(Self::En),
             "ja" => Some(Self::Ja),
+            // AI編輯：接受「zh-hant / zh-tw / zh」三種代碼。
+            "zh-hant" | "zh-tw" | "zh" => Some(Self::ZhHant),
             _ => None,
         }
     }
     pub fn tr(self, source: &str) -> &str {
-        if self == Self::Ja { japanese().get(source).map(String::as_str).unwrap_or(source) } else { source }
+        match self {
+            Self::Ja => japanese().get(source).map(String::as_str).unwrap_or(source),
+            // AI編輯：新增繁體中文翻譯查詢。
+            Self::ZhHant => zh_hant().get(source).map(String::as_str).unwrap_or(source),
+            Self::En => source,
+        }
     }
 }
 
@@ -39,7 +51,12 @@ thread_local! {
 }
 
 pub fn default_language() -> Language {
-    if std::env::var("LIGHTCRAFT_LANGUAGE").as_deref() == Ok("ja") { Language::Ja } else { Language::En }
+    // AI編輯：支援 LIGHTCRAFT_LANGUAGE=zh-hant / zh-tw / zh。
+    match std::env::var("LIGHTCRAFT_LANGUAGE").as_deref() {
+        Ok("ja") => Language::Ja,
+        Ok("zh-hant") | Ok("zh-tw") | Ok("zh") => Language::ZhHant,
+        _ => Language::En,
+    }
 }
 
 pub fn set_language(language: Language) {
@@ -48,6 +65,11 @@ pub fn set_language(language: Language) {
 
 pub fn is_japanese() -> bool {
     LANGUAGE.with(|value| value.get() == Language::Ja)
+}
+
+// AI編輯：新增「目前是否為繁中介面」查詢。
+pub fn is_zhhant() -> bool {
+    LANGUAGE.with(|value| value.get() == Language::ZhHant)
 }
 
 fn japanese() -> &'static BTreeMap<String, String> {
@@ -60,10 +82,28 @@ fn japanese() -> &'static BTreeMap<String, String> {
     })
 }
 
+// AI編輯：繁體中文（zh-hant）訊息目錄，由 AI 完整翻譯（1019 條）。
+fn zh_hant() -> &'static BTreeMap<String, String> {
+    static MESSAGES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("../locales/zh-hant.json")).unwrap_or_else(|error| {
+            log::error!("Invalid Traditional Chinese message catalog: {error}");
+            BTreeMap::new()
+        })
+    })
+}
+
 /// Translate a built-in display label, preserving unknown labels verbatim.
 /// Never call this on editable user text, filenames or command identifiers.
 pub fn tr(source: &str) -> &str {
-    if is_japanese() { japanese().get(source).map(String::as_str).unwrap_or(source) } else { source }
+    if is_japanese() {
+        japanese().get(source).map(String::as_str).unwrap_or(source)
+    } else if is_zhhant() {
+        // AI編輯：繁中查詢路徑。
+        zh_hant().get(source).map(String::as_str).unwrap_or(source)
+    } else {
+        source
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +129,103 @@ mod tests {
         assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "カラー");
         set_language(Language::En);
         assert_eq!(tr("Exposure"), "Exposure");
+    }
+
+    // AI編輯：繁體中文目錄完整且涵蓋核心工作流程。
+    #[test]
+    fn traditional_chinese_catalog_is_valid_and_contains_core_workflows() {
+        let messages: BTreeMap<String, String> = serde_json::from_str(include_str!("../locales/zh-hant.json")).unwrap();
+        for key in ["Import Photos…", "Export…", "Exposure", "White Balance", "Settings", "Language"] {
+            assert!(messages.get(key).is_some_and(|value| !value.is_empty() && value != key), "{key}");
+        }
+    }
+
+    // AI編輯：繁中切換、未知文字保留與選單標籤翻譯。
+    #[test]
+    fn language_switches_to_traditional_chinese_and_unknown_text_survives() {
+        set_language(Language::ZhHant);
+        assert_eq!(tr("Exposure"), "曝光");
+        assert_eq!(tr("my-photo.jpg"), "my-photo.jpg");
+        assert_eq!(tr("develop.set"), "develop.set");
+        assert_eq!(crate::menubar::display_item_label("album.addPhotos", &serde_json::json!({"id": 1}), "Color"), "Color");
+        assert_eq!(crate::menubar::display_item_label("app.export", &serde_json::json!({"preset": "Color"}), "Color"), "Color");
+        assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "顏色");
+        set_language(Language::En);
+        assert_eq!(tr("Exposure"), "Exposure");
+    }
+
+    // AI編輯：繁中複數格式保留計數。
+    #[test]
+    fn traditional_chinese_formats_preserve_counts_and_remove_english_plural_suffixes() {
+        set_language(Language::ZhHant);
+        assert_eq!(tr_format!("{n} photo{}", "s", n = 12), "12 張相片");
+        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "已匯出 12 張中的 4 張相片");
+        set_language(Language::En);
+        assert_eq!(tr_format!("{n} photo{}", "s", n = 12), "12 photos");
+    }
+
+    // AI編輯：繁中語言設定可序列化往返（zh-hant）。
+    #[test]
+    fn traditional_chinese_preferences_round_trip() {
+        let old: crate::state::UiState = serde_json::from_str("{}").unwrap();
+        let settings = crate::state::UiState { language: Language::ZhHant, ..old };
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: crate::state::UiState = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.language, Language::ZhHant);
+    }
+
+    // AI編輯：繁中介面實際繪製出中文（需系統已安裝中文字型；未安裝時跳過字形檢查）。
+    #[test]
+    fn traditional_chinese_is_painted() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
+        app.ui.language = Language::ZhHant;
+        app.ui.left_panel = true;
+        let mut text = String::new();
+        fn collect(shape: &egui::epaint::Shape, text: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(shape) => {
+                    text.push_str(&shape.galley.job.text);
+                    text.push('\n');
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, text)),
+                _ => {}
+            }
+        }
+        for frame in 0..4 {
+            let input = crate::headless::HeadlessView::raw_input(egui::vec2(1600.0, 1000.0), 1.0, frame as f64 / 60.0, vec![]);
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            text.clear();
+            for shape in out.shapes {
+                collect(&shape.shape, &mut text);
+            }
+        }
+        assert!(text.contains("我的相片"), "{text}");
+        assert!(text.contains("所有相片"), "{text}");
+        if crate::theme::system_cjk_fonts().is_empty() {
+            eprintln!("skipped glyph coverage: no system CJK font installed");
+        } else {
+            ctx.fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
+                    let font = egui::FontId::new(13.0, family);
+                    for message in zh_hant().values() {
+                        for ch in message.chars().filter(|ch| !ch.is_whitespace()) {
+                            assert!(fonts.has_glyph(&font, ch), "Missing glyph {ch} in {message}");
+                        }
+                    }
+                }
+            });
+        }
+        // Locale affects presentation only: command ids remain the same.
+        let ids = |app: &crate::LightcraftApp| crate::menus::menu_entries(app).into_iter().map(|entry| entry.id).collect::<Vec<_>>();
+        let chinese_ids = ids(&app);
+        set_language(Language::En);
+        assert_eq!(chinese_ids, ids(&app));
     }
 
     #[test]

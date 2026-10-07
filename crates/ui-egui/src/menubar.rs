@@ -272,6 +272,8 @@ pub fn checked(app: &LightcraftApp, id: &str) -> Option<bool> {
     match id {
         "app.language.english" => Some(u.language == crate::i18n::Language::En),
         "app.language.japanese" => Some(u.language == crate::i18n::Language::Ja),
+        // AI編輯：新增繁中語言項目的勾選狀態。
+        "app.language.traditionalChinese" => Some(u.language == crate::i18n::Language::ZhHant),
         "develop.autoSync" => Some(app.session.auto_sync),
         "view.photoCounts" => Some(u.show_counts),
         "view.secondWindow" => Some(u.second_window),

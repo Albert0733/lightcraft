@@ -110,6 +110,57 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(font_definitions(lightcraft_engine::CRAFT_FONTS));
 }
 
+// AI編輯：掃描系統已安裝的中文字型（Windows 微軟正黑體、macOS PingFang TC、Linux Noto CJK 等），
+// 讓繁體中文介面在未以 `CRAFT_FONTS_DIR` 建置時也能正確顯示（不需要 craft-fonts）。
+// 依優先順序列出：繁體黑體在前，簡中黑體與宋體在後。
+const SYSTEM_CJK_FONTS: &[(&str, u32)] = &[
+    ("msjh.ttc", 0), // Microsoft JhengHei（繁中黑體）
+    ("msjhbd.ttc", 0), // Microsoft JhengHei Bold
+    ("msjhl.ttc", 0), // Microsoft JhengHei Light
+    ("msyh.ttc", 0), // Microsoft YaHei
+    ("msyhbd.ttc", 0),
+    ("simsun.ttc", 0), // SimSun 宋體
+    ("Deng.ttf", 0), // DengXian 等線
+    ("Dengb.ttf", 0),
+    ("simhei.ttf", 0), // SimHei
+    ("PingFang.ttc", 0), // macOS PingFang TC/SC
+    ("STHeiti Light.ttc", 0),
+    ("Hiragino Sans GB.ttc", 0),
+    ("NotoSansCJK-Regular.ttc", 0),
+    ("NotoSansCJKtc-Regular.otf", 0),
+    ("wqy-microhei.ttc", 0),
+    ("wqy-zenhei.ttc", 0),
+];
+
+/// 已安裝的系統中文字型（名稱, 字型資料）。只載入真實存在的檔案；支援 .ttc 集合（index）。
+pub fn system_cjk_fonts() -> Vec<(String, Arc<FontData>)> {
+    let dirs = [
+        "C:\\Windows\\Fonts",
+        "/System/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+        "/usr/share/fonts/opentype/noto",
+        "/usr/share/fonts/truetype/wqy",
+    ];
+    let mut out = Vec::new();
+    for (file, index) in SYSTEM_CJK_FONTS {
+        let mut path = None;
+        for dir in dirs {
+            let candidate = std::path::Path::new(dir).join(file);
+            if candidate.is_file() {
+                path = Some(candidate);
+                break;
+            }
+        }
+        if let Some(path) = path {
+            if let Ok(bytes) = std::fs::read(path) {
+                let name = format!("system-cjk-{}", file.replace(['.', ' ', '-'], "_"));
+                out.push((name, Arc::new(FontData { font: std::borrow::Cow::Owned(bytes), index: *index, tweak: Default::default() })));
+            }
+        }
+    }
+    out
+}
+
 /// Inter (bundled) for Latin text, egui's default fonts, then the craft-fonts Japanese faces as
 /// the last fallback of every family (BIZ UDPGothic first; Bold first for the semibold family).
 /// Without craft-fonts (`craft` empty) Japanese text has no glyphs and shows as boxes.
@@ -128,15 +179,24 @@ pub fn font_definitions(craft: &'static [lightcraft_engine::CraftFont]) -> FontD
         faces.into_iter().map(craft_font_name).collect::<Vec<_>>()
     };
     let defaults: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    // AI編輯：系統中文字型（含繁中）加入字型資料與所有家族的最後後備。
+    let cjk = system_cjk_fonts();
+    let cjk_names: Vec<String> = cjk.iter().map(|(name, _)| name.clone()).collect();
+    for (name, data) in &cjk {
+        fonts.font_data.insert(name.clone(), data.clone());
+    }
     let mut prop = vec!["Inter".to_string()];
     prop.extend(defaults.iter().cloned());
     prop.extend(fallback("Regular"));
+    prop.extend(cjk_names.iter().cloned());
     fonts.families.insert(FontFamily::Proportional, prop);
     let mut semi = vec!["Inter-SemiBold".to_string()];
     semi.extend(defaults);
     semi.extend(fallback("Bold"));
+    semi.extend(cjk_names.iter().cloned());
     fonts.families.insert(FontFamily::Name(FONT_SEMIBOLD.into()), semi);
     fonts.families.entry(FontFamily::Monospace).or_default().extend(fallback("Regular"));
+    fonts.families.entry(FontFamily::Monospace).or_default().extend(cjk_names.iter().cloned());
     fonts
 }
 
